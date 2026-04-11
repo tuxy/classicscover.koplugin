@@ -1,6 +1,6 @@
 local _ = require("gettext")
 return {
-    name = "penguincover",
+    name = "classsicscover",
     fullname = _("Classics Cover Generator"),
     description = _([[Generates a Classics-style cover for a book.
 Hold a book in the file browser to find the "Generate Classics Cover" option.
