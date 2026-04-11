@@ -1,14 +1,14 @@
--- penguincover.koplugin/main.lua
+-- classicscover.koplugin/main.lua
 --
 -- Flow:
 --   1. Hold a book in the file browser.
---   2. Tap "Penguin Cover" in the hold menu.
+--   2. Tap "Classics Cover" in the hold menu.
 --   3. Pick a background image from the backgrounds folder.
 --   4. Confirm/edit title and author (auto-filled from book metadata).
 --   5. POST background + title + author to the Flask server.
 --   6. The returned PNG is saved as the book's custom cover.
 --
--- Tools > Penguin Cover Generator:
+-- Tools > Classics Cover Generator:
 --   - Set backgrounds folder  (default: <koreader>/backgrounds/)
 --   - Change server URL
 --   - About
@@ -209,7 +209,7 @@ local function generateAndApplyCover(file_path, title, author, bg_path)
               or "image/jpeg"
 
     local spinner = InfoMessage:new{
-        text = _("Generating Penguin cover..."), timeout = 0 }
+        text = _("Generating Classics cover..."), timeout = 0 }
     UIManager:show(spinner)
     UIManager:forceRePaint()
 
@@ -256,7 +256,7 @@ local function generateAndApplyCover(file_path, title, author, bg_path)
     UIManager:broadcastEvent(Event:new("BookMetadataChanged"))
 
     UIManager:show(InfoMessage:new{
-        text = _("Penguin cover applied!"), timeout = 3 })
+        text = _("Classics cover applied!"), timeout = 3 })
 
     local FM = require("apps/filemanager/filemanager")
     if FM.instance then FM.instance:onRefresh() end
@@ -307,7 +307,7 @@ local function showBackgroundPicker(file_path, title, author)
             text = T(_(
                 "Backgrounds folder created:\n%1\n\n"
                 .. "Add JPG/PNG images there, then try again.\n"
-                .. "Change folder: Tools > Penguin Cover Generator"
+                .. "Change folder: Tools > Classics Cover Generator"
             ), folder),
             timeout = 6 })
         return
@@ -319,7 +319,7 @@ local function showBackgroundPicker(file_path, title, author)
             text = T(_(
                 "No images found in:\n%1\n\n"
                 .. "Add JPG or PNG files there.\n"
-                .. "Change folder: Tools > Penguin Cover Generator"
+                .. "Change folder: Tools > Classics Cover Generator"
             ), folder),
             timeout = 5 })
         return
@@ -381,7 +381,7 @@ function PenguinCover:_registerFileDialogButton()
             return nil
         end
         return {{
-            text = _("Penguin Cover"),
+            text = _("Classics Cover"),
             callback = function()
                 local fc = FileManager.instance and FileManager.instance.file_chooser
                 if fc and fc.file_dialog then
@@ -397,7 +397,7 @@ end
 
 function PenguinCover:addToMainMenu(menu_items)
     menu_items.penguin_cover = {
-        text           = _("Penguin Cover Generator"),
+        text           = _("Classics Cover Generator"),
         sorting_hint   = "tools",
         sub_item_table = {
 
@@ -505,8 +505,8 @@ function PenguinCover:addToMainMenu(menu_items)
                 callback = function()
                     UIManager:show(InfoMessage:new{
                         text = T(_(
-                            "Penguin Cover Generator\n\n"
-                            .. "Hold a book > Penguin Cover\n"
+                            "Classics Cover Generator\n\n"
+                            .. "Hold a book > Classics Cover\n"
                             .. "Pick a background image, confirm\n"
                             .. "title/author, cover is applied.\n\n"
                             .. "Backgrounds folder:\n%1\n\n"
