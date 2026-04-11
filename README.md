@@ -19,7 +19,7 @@
 ## Installation
 -----
 1. Download the Zip Below
-2. Extract and copy the penguincover. Koplugin folder to your device's plugins/ directory
+2. Extract and copy the penguincover.koplugin folder to your device's plugins/ directory
 3. Restart KOReader and go to **Menu -> Tools -> Penguin Cover Generator** to change the settings.
    
 ## Technical Details:
