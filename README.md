@@ -5,7 +5,7 @@
 
 <img width="1920" height="1080" alt="Untitled design" src="https://github.com/user-attachments/assets/c6f8e209-4ef9-4e0f-98cd-b5887908fe92" />
 
-<img width="1272" height="1696" alt="FileManager_2026-04-11_084959" src="https://github.com/user-attachments/assets/accf5925-6b42-4327-af77-89acff0afc12" />
+
 
 ## 📚 Penguin Cover Generator. How It Works
 1. Make sure your device is connected to the internet
