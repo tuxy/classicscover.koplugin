@@ -1,8 +1,11 @@
-# Penguin Cover - Koreader Plugin 
-## A KOReader plugin generate book cover directly from koreader and automatically replaced it. Tested on Kindle Paperwhite 12 Koreader 03.2026
+# Penguin Cover Koreader Plugin
+# Auto-Generate & Apply Book Covers (Tested on Kindle Paperwhite 12, KOReader 2026.03)
 -----
-![[Untitled design (1).png]]
-![[FileManager_2026-04-11_084959.png]]
+## Fan fiction, missing covers, or blurry book cover? Fix them with Penguin Classics–style covers directly in KOReader.
+
+<img width="1920" height="1080" alt="Untitled design (1)" src="https://github.com/user-attachments/assets/1480e6c2-590c-4ac8-b6ae-fb0548eb4284" />
+<img width="1272" height="1696" alt="FileManager_2026-04-11_084959" src="https://github.com/user-attachments/assets/accf5925-6b42-4327-af77-89acff0afc12" />
+
 ## 📚 Penguin Cover Generator. How It Works
 1. Make sure your device is connected to the internet
 2. Long-press the book you want to book cover changed.
@@ -12,6 +15,7 @@
 6. Tap **Generate**
 7. Wait until you see the notification: _“Cover image applied”_
 8. Done 🎉
+   
 ## Installation
 -----
 1. Download the Zip Below
