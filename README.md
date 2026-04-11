@@ -3,7 +3,8 @@
 -----
 ## Fan fiction, missing covers, or blurry book cover? Fix them with Penguin Classics–style covers directly in KOReader.
 
-<img width="1920" height="1080" alt="Untitled design (1)" src="https://github.com/user-attachments/assets/1480e6c2-590c-4ac8-b6ae-fb0548eb4284" />
+<img width="1920" height="1080" alt="Untitled design" src="https://github.com/user-attachments/assets/c6f8e209-4ef9-4e0f-98cd-b5887908fe92" />
+
 <img width="1272" height="1696" alt="FileManager_2026-04-11_084959" src="https://github.com/user-attachments/assets/accf5925-6b42-4327-af77-89acff0afc12" />
 
 ## 📚 Penguin Cover Generator. How It Works
