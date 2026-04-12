@@ -9,7 +9,6 @@ Usage:
 import io
 import os
 import sys
-import traceback
 
 from flask import Flask, jsonify, request, send_file
 from PIL import Image, ImageDraw, ImageFont
@@ -27,6 +26,12 @@ SMALL_WORDS = {
     "on", "at", "to", "by", "in", "of", "up", "as", "is",
 }
 
+DEFAULT_AUTHOR_FONT_SIZE = 52
+DEFAULT_TITLE_FONT_SIZE = 70
+MIN_FONT_SIZE = 12
+MAX_FONT_SIZE = 160
+MAX_TEXT_LENGTH = 200
+
 
 def smart_title(text: str) -> str:
     words = text.split()
@@ -34,6 +39,15 @@ def smart_title(text: str) -> str:
         word.capitalize() if index == 0 or word.lower() not in SMALL_WORDS else word.lower()
         for index, word in enumerate(words)
     )
+
+
+def normalize_text(value: str, field_name: str) -> tuple[str, str | None]:
+    text = " ".join(value.split())
+    if not text:
+        return "", f"{field_name} is required."
+    if len(text) > MAX_TEXT_LENGTH:
+        return "", f"{field_name} must be {MAX_TEXT_LENGTH} characters or fewer."
+    return text, None
 
 
 def get_text_width_with_spacing(text, font, spacing=0):
@@ -94,7 +108,14 @@ def fit_background(bg_image: Image.Image, width: int, strip_y: int) -> Image.Ima
     return bg
 
 
-def make_penguin_cover(title: str, author: str, bg_image: Image.Image, logo_path: str) -> io.BytesIO:
+def make_penguin_cover(
+    title: str,
+    author: str,
+    bg_image: Image.Image,
+    logo_path: str,
+    title_font_size: int | None = None,
+    author_font_size: int | None = None,
+) -> io.BytesIO:
     width, height = 1236, 1648
     cover = Image.new("RGB", (width, height), (255, 255, 255))
 
@@ -106,8 +127,8 @@ def make_penguin_cover(title: str, author: str, bg_image: Image.Image, logo_path
     cover.paste(fit_background(bg_image, width, strip_y), (0, 0))
     draw = ImageDraw.Draw(cover)
 
-    font_author = ImageFont.truetype(FONT_REGULAR, 52)
-    font_title = ImageFont.truetype(FONT_ITALIC, 70)
+    font_author = ImageFont.truetype(FONT_REGULAR, author_font_size or DEFAULT_AUTHOR_FONT_SIZE)
+    font_title = ImageFont.truetype(FONT_ITALIC, title_font_size or DEFAULT_TITLE_FONT_SIZE)
     font_strip = ImageFont.truetype(FONT_REGULAR, 36)
 
     padding = 80
@@ -123,7 +144,8 @@ def make_penguin_cover(title: str, author: str, bg_image: Image.Image, logo_path
     cover.paste(rule, (0, strip_y), rule)
     cover.paste(rule, (0, strip_y + strip_h - rule_h), rule)
 
-    logo = Image.open(logo_path).convert("RGBA")
+    with Image.open(logo_path) as logo_image:
+        logo = logo_image.convert("RGBA")
     logo_h = strip_h - 60
     logo_w = int(logo.width * logo_h / logo.height)
     logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
@@ -212,19 +234,44 @@ def validate_dependencies():
     return errors
 
 
+def parse_optional_font_size(field_name: str) -> tuple[int | None, str | None]:
+    value = request.form.get(field_name, "").strip()
+    if not value:
+        return None, None
+
+    try:
+        size = int(value)
+    except ValueError:
+        return None, f"{field_name.replace('_', ' ').capitalize()} must be an integer."
+
+    if size < MIN_FONT_SIZE or size > MAX_FONT_SIZE:
+        return None, (
+            f"{field_name.replace('_', ' ').capitalize()} must be between "
+            f"{MIN_FONT_SIZE} and {MAX_FONT_SIZE}."
+        )
+
+    return size, None
+
+
 @app.route("/generate", methods=["POST"])
 def generate():
-    title = request.form.get("title", "").strip()
-    author = request.form.get("author", "").strip()
+    title, title_error = normalize_text(request.form.get("title", ""), "Title")
+    author, author_error = normalize_text(request.form.get("author", ""), "Author")
     image = request.files.get("image")
+    title_font_size, title_font_error = parse_optional_font_size("title_font_size")
+    author_font_size, author_font_error = parse_optional_font_size("author_font_size")
 
     errors = []
-    if not title:
-        errors.append("Title is required.")
-    if not author:
-        errors.append("Author is required.")
+    if title_error:
+        errors.append(title_error)
+    if author_error:
+        errors.append(author_error)
     if not image or image.filename == "":
         errors.append("Background image is required.")
+    if title_font_error:
+        errors.append(title_font_error)
+    if author_font_error:
+        errors.append(author_font_error)
 
     errors.extend(validate_dependencies())
     if errors:
@@ -232,13 +279,21 @@ def generate():
         return jsonify({"errors": errors}), status
 
     try:
-        bg_image = Image.open(image.stream)
-        buf = make_penguin_cover(title, author, bg_image, DEFAULT_LOGO_PATH)
+        with Image.open(image.stream) as uploaded_image:
+            bg_image = uploaded_image.convert("RGB")
+        buf = make_penguin_cover(
+            title,
+            author,
+            bg_image,
+            DEFAULT_LOGO_PATH,
+            title_font_size=title_font_size,
+            author_font_size=author_font_size,
+        )
         safe_title = "".join(char if char.isalnum() or char in " _-" else "_" for char in title)
         filename = f"cover_{safe_title[:40].strip()}.png"
         return send_file(buf, mimetype="image/png", as_attachment=True, download_name=filename)
     except Exception as exc:
-        traceback.print_exc()
+        app.logger.exception("Cover generation failed")
         return jsonify({"errors": [f"Cover generation failed: {exc}"]}), 500
 
 
@@ -250,4 +305,4 @@ if __name__ == "__main__":
             print(f"  {item}", file=sys.stderr)
 
     print("Cover generator listening on http://0.0.0.0:5000/generate")
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(debug=False, host="0.0.0.0", port=5000)

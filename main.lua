@@ -28,6 +28,9 @@ local _                = require("gettext")
 
 local COVER_SERVER_URL = "https://dwigunakd.pythonanywhere.com/generate"
 local _bg_folder       = nil
+local DEFAULT_TITLE_FONT_SIZE = 70
+local DEFAULT_AUTHOR_FONT_SIZE = 52
+local TMP_COVER_PATH = "/tmp/penguincover-cover.png"
 
 local PenguinCover = WidgetContainer:extend{
     name        = "penguincover",
@@ -64,6 +67,50 @@ end
 local function setServerUrl(url)
     COVER_SERVER_URL = url
     G_reader_settings:saveSetting("penguincover_server_url", url)
+end
+
+local function isValidServerUrl(url)
+    return type(url) == "string" and url:match("^https?://[%w%-%._~:/%?#%[%]@!$&%'%(%)%*%+,;=]+$")
+end
+
+local function getOptionalFontSize(setting_key)
+    local saved = G_reader_settings:readSetting(setting_key)
+    if saved == nil or saved == "" then
+        return nil
+    end
+
+    local size = tonumber(saved)
+    if size and size > 0 then
+        return math.floor(size)
+    end
+
+    G_reader_settings:saveSetting(setting_key, "")
+    return nil
+end
+
+local function setOptionalFontSize(setting_key, size)
+    if size == nil or size == "" then
+        G_reader_settings:saveSetting(setting_key, "")
+        return
+    end
+
+    G_reader_settings:saveSetting(setting_key, tostring(math.floor(size)))
+end
+
+local function getTitleFontSize()
+    return getOptionalFontSize("penguincover_title_font_size")
+end
+
+local function setTitleFontSize(size)
+    setOptionalFontSize("penguincover_title_font_size", size)
+end
+
+local function getAuthorFontSize()
+    return getOptionalFontSize("penguincover_author_font_size")
+end
+
+local function setAuthorFontSize(size)
+    setOptionalFontSize("penguincover_author_font_size", size)
 end
 
 -- Image helpers ---------------------------------------------------------------
@@ -169,6 +216,7 @@ local function httpPost(url, body, content_type)
     local ok2, ltn12 = pcall(require, "ltn12")
     if not (ok1 and ok2) then return nil, "LuaSocket not available" end
     local chunks = {}
+    http.TIMEOUT = 30
     local _, code = http.request{
         url     = url,
         method  = "POST",
@@ -183,6 +231,13 @@ local function httpPost(url, body, content_type)
         return nil, "HTTP " .. tostring(code) .. ": " .. table.concat(chunks)
     end
     return table.concat(chunks), nil
+end
+
+local function getFontSizeField(name, value)
+    if not value then
+        return nil
+    end
+    return { name = name, value = tostring(value) }
 end
 
 -- Core: generate and apply cover ----------------------------------------------
@@ -213,9 +268,23 @@ local function generateAndApplyCover(file_path, title, author, bg_path)
     UIManager:show(spinner)
     UIManager:forceRePaint()
 
-    local boundary = "PenguinBoundary" .. tostring(os.time())
-    local body     = buildMultipart(boundary,
-        { {name="title", value=title}, {name="author", value=author} },
+    local fields = {
+        { name = "title", value = title },
+        { name = "author", value = author },
+    }
+    local title_font_size = getTitleFontSize()
+    local author_font_size = getAuthorFontSize()
+    local title_field = getFontSizeField("title_font_size", title_font_size)
+    local author_field = getFontSizeField("author_font_size", author_font_size)
+    if title_field then
+        fields[#fields + 1] = title_field
+    end
+    if author_field then
+        fields[#fields + 1] = author_field
+    end
+
+    local boundary = "PenguinBoundary" .. tostring(os.time()) .. tostring(math.random(1000, 9999))
+    local body     = buildMultipart(boundary, fields,
         { name="image", filename=ffiutil.basename(bg_path),
           content_type=mime, data=bg_data })
     local ct = "multipart/form-data; boundary=" .. boundary
@@ -230,11 +299,10 @@ local function generateAndApplyCover(file_path, title, author, bg_path)
         return
     end
 
-    local tmp_cover_path = "/tmp/penguincover-cover.png"
-    local out = io.open(tmp_cover_path, "wb")
+    local out = io.open(TMP_COVER_PATH, "wb")
     if not out then
         UIManager:show(InfoMessage:new{
-            text = T(_("Cannot save temporary cover:\n%1"), tmp_cover_path), timeout = 4 })
+            text = T(_("Cannot save temporary cover:\n%1"), TMP_COVER_PATH), timeout = 4 })
         return
     end
     out:write(response)
@@ -242,14 +310,15 @@ local function generateAndApplyCover(file_path, title, author, bg_path)
 
     local DocSettings = require("docsettings")
     local ds = DocSettings:open(file_path)
-    if not ds:flushCustomCover(file_path, tmp_cover_path) then
+    if not ds:flushCustomCover(file_path, TMP_COVER_PATH) then
+        os.remove(TMP_COVER_PATH)
         UIManager:show(InfoMessage:new{
             text = _("Cover was generated, but KOReader could not store it as a custom cover."),
             timeout = 5 })
         return
     end
     ds:getCustomCoverFile(true)
-    os.remove(tmp_cover_path)
+    os.remove(TMP_COVER_PATH)
 
     invalidateThumbnail(file_path)
     UIManager:broadcastEvent(Event:new("InvalidateMetadataCache", file_path))
@@ -354,6 +423,8 @@ end
 function PenguinCover:init()
     getServerUrl()
     getBackgroundsFolder()
+    getTitleFontSize()
+    getAuthorFontSize()
     if not self.ui.document then
         self.ui.menu:registerToMainMenu(self)
     end
@@ -376,7 +447,7 @@ function PenguinCover:_registerFileDialogButton()
     FileManager._penguincover_button_registered = true
 
     local DocumentRegistry = require("document/documentregistry")
-    FileManager:addFileDialogButtons("penguin_cover", function(file, is_file, book_props)
+    FileManager:addFileDialogButtons("penguin_cover", function(file, is_file)
         if not is_file or not DocumentRegistry:hasProvider(file) then
             return nil
         end
@@ -463,6 +534,134 @@ function PenguinCover:addToMainMenu(menu_items)
                 end,
             },
 
+            -- Title font size
+            {
+                text           = _("Set title font size"),
+                keep_menu_open = true,
+                callback       = function()
+                    local inp
+                    inp = InputDialog:new{
+                        title       = _("Title font size"),
+                        input       = tostring(getTitleFontSize() or ""),
+                        input_hint  = _("Leave empty for default"),
+                        description = T(_(
+                            "Optional size for the book title text.\n"
+                            .. "Default size: %1.\n"
+                            .. "Empty = use the server default layout."
+                        ), DEFAULT_TITLE_FONT_SIZE),
+                        buttons = {{
+                            {
+                                text     = _("Cancel"),
+                                callback = function() UIManager:close(inp) end,
+                            },
+                            {
+                                text     = _("Reset default"),
+                                callback = function()
+                                    setTitleFontSize(nil)
+                                    UIManager:close(inp)
+                                    UIManager:show(InfoMessage:new{
+                                        text    = _("Title font size reset to server default."),
+                                        timeout = 3 })
+                                end,
+                            },
+                            {
+                                text             = _("Save"),
+                                is_enter_default = true,
+                                callback         = function()
+                                    local raw = inp:getInputText():match("^%s*(.-)%s*$")
+                                    if raw == "" then
+                                        setTitleFontSize(nil)
+                                        UIManager:close(inp)
+                                        return
+                                    end
+
+                                    local size = tonumber(raw)
+                                    if not size or size <= 0 then
+                                        UIManager:show(InfoMessage:new{
+                                            text    = _("Enter a positive number for the title font size."),
+                                            timeout = 4 })
+                                        return
+                                    end
+
+                                    size = math.floor(size)
+                                    setTitleFontSize(size)
+                                    UIManager:close(inp)
+                                    UIManager:show(InfoMessage:new{
+                                        text    = T(_("Title font size set to %1."), size),
+                                        timeout = 3 })
+                                end,
+                            },
+                        }},
+                    }
+                    UIManager:show(inp)
+                    inp:onShowKeyboard()
+                end,
+            },
+
+            -- Author font size
+            {
+                text           = _("Set author font size"),
+                keep_menu_open = true,
+                callback       = function()
+                    local inp
+                    inp = InputDialog:new{
+                        title       = _("Author font size"),
+                        input       = tostring(getAuthorFontSize() or ""),
+                        input_hint  = _("Leave empty for default"),
+                        description = T(_(
+                            "Optional size for the author text.\n"
+                            .. "Default size: %1.\n"
+                            .. "Empty = use the server default layout."
+                        ), DEFAULT_AUTHOR_FONT_SIZE),
+                        buttons = {{
+                            {
+                                text     = _("Cancel"),
+                                callback = function() UIManager:close(inp) end,
+                            },
+                            {
+                                text     = _("Reset default"),
+                                callback = function()
+                                    setAuthorFontSize(nil)
+                                    UIManager:close(inp)
+                                    UIManager:show(InfoMessage:new{
+                                        text    = _("Author font size reset to server default."),
+                                        timeout = 3 })
+                                end,
+                            },
+                            {
+                                text             = _("Save"),
+                                is_enter_default = true,
+                                callback         = function()
+                                    local raw = inp:getInputText():match("^%s*(.-)%s*$")
+                                    if raw == "" then
+                                        setAuthorFontSize(nil)
+                                        UIManager:close(inp)
+                                        return
+                                    end
+
+                                    local size = tonumber(raw)
+                                    if not size or size <= 0 then
+                                        UIManager:show(InfoMessage:new{
+                                            text    = _("Enter a positive number for the author font size."),
+                                            timeout = 4 })
+                                        return
+                                    end
+
+                                    size = math.floor(size)
+                                    setAuthorFontSize(size)
+                                    UIManager:close(inp)
+                                    UIManager:show(InfoMessage:new{
+                                        text    = T(_("Author font size set to %1."), size),
+                                        timeout = 3 })
+                                end,
+                            },
+                        }},
+                    }
+                    UIManager:show(inp)
+                    inp:onShowKeyboard()
+                end,
+            },
+
             -- Change server URL
             {
                 text           = _("Change server URL"),
@@ -484,6 +683,12 @@ function PenguinCover:addToMainMenu(menu_items)
                                 callback         = function()
                                     local url = inp:getInputText():match("^%s*(.-)%s*$")
                                     if url ~= "" then
+                                        if not isValidServerUrl(url) then
+                                            UIManager:show(InfoMessage:new{
+                                                text    = _("Enter a valid http:// or https:// server URL."),
+                                                timeout = 4 })
+                                            return
+                                        end
                                         setServerUrl(url)
                                         UIManager:show(InfoMessage:new{
                                             text    = T(_("URL saved:\n%1"), url),
