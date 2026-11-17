@@ -3,21 +3,19 @@
 -- Flow:
 --   1. Hold a book in the file browser.
 --   2. Tap "Classics Cover" in the hold menu.
---   3. Pick a background image from the backgrounds folder.
---   4. Confirm/edit title and author (auto-filled from book metadata).
---   5. POST background + title + author to the Flask server.
---   6. The returned PNG is saved as the book's custom cover.
+--   3. Confirm/edit title and author (auto-filled from book metadata).
+--   4. The cover is rendered on the device: a random gradient background,
+--      the black bottom panel, the CLASSICS strip and the title/author.
+--   5. The PNG is saved as the book's custom cover.
 --
 -- Tools > Classics Cover Generator:
---   - Set backgrounds folder  (default: <koreader>/backgrounds/)
---   - Change server URL
+--   - Set title font size
+--   - Set author font size
 --   - About
 
 local InfoMessage      = require("ui/widget/infomessage")
 local InputDialog      = require("ui/widget/inputdialog")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
-local NetworkMgr       = require("ui/network/manager")
-local PathChooser      = require("ui/widget/pathchooser")
 local UIManager        = require("ui/uimanager")
 local WidgetContainer  = require("ui/widget/container/widgetcontainer")
 local Event            = require("ui/event")
@@ -26,14 +24,32 @@ local lfs              = require("libs/libkoreader-lfs")
 local T                = ffiutil.template
 local _                = require("gettext")
 
-local COVER_SERVER_URL = "https://dwigunakd.pythonanywhere.com/generate"
-local _bg_folder       = nil
+local CoverRenderer    = require("cover_renderer")
+
 local DEFAULT_TITLE_FONT_SIZE = 70
 local DEFAULT_AUTHOR_FONT_SIZE = 52
-local TMP_COVER_PATH = "/tmp/penguincover-cover.png"
+local MIN_FONT_SIZE = 12
+local MAX_FONT_SIZE = 160
 
-local PenguinCover = WidgetContainer:extend{
-    name        = "penguincover",
+local TITLE_FONT_FILE = "/assets/fonts/EBGaramond-Italic.ttf"
+local AUTHOR_FONT_FILE = "/assets/fonts/JosefinSans-SemiBold.ttf"
+local LOGO_FILE = "/assets/logo.png"
+
+-- Optional fallback fonts for characters the two cover fonts do not contain.
+-- These are the fonts bundled with KOReader; missing files are simply skipped.
+local FALLBACK_FONT_FILES = {
+    "fonts/noto/NotoSans-Regular.ttf",
+    "fonts/noto/NotoSansCJKsc-Regular.otf",
+    "fonts/noto/NotoSansArabicUI-Regular.ttf",
+    "fonts/noto/NotoSansDevanagariUI-Regular.ttf",
+    "fonts/noto/NotoSansBengaliUI-Regular.ttf",
+    "fonts/noto/NotoNaskhArabic-Regular.ttf",
+}
+
+local PLUGIN_DIR = (debug.getinfo(1, "S").source or ""):match("^@(.*)[/\\][^/\\]+$") or "."
+
+local ClassicsCover = WidgetContainer:extend{
+    name        = "classicscover",
     is_doc_only = false,
 }
 
@@ -43,34 +59,6 @@ local function getKoreaderDir()
     local ok, DS = pcall(require, "datastorage")
     if ok and DS then return DS:getDataDir() end
     return (os.getenv("KOREADER_DIR") or "/mnt/onboard/.adds/koreader")
-end
-
-local function getBackgroundsFolder()
-    if _bg_folder then return _bg_folder end
-    local saved = G_reader_settings:readSetting("penguincover_bg_folder")
-    _bg_folder = (saved and saved ~= "") and saved
-                 or (getKoreaderDir() .. "/backgrounds")
-    return _bg_folder
-end
-
-local function setBackgroundsFolder(path)
-    _bg_folder = (path and path ~= "") and path or nil
-    G_reader_settings:saveSetting("penguincover_bg_folder", _bg_folder or "")
-end
-
-local function getServerUrl()
-    local saved = G_reader_settings:readSetting("penguincover_server_url")
-    if saved and saved ~= "" then COVER_SERVER_URL = saved end
-    return COVER_SERVER_URL
-end
-
-local function setServerUrl(url)
-    COVER_SERVER_URL = url
-    G_reader_settings:saveSetting("penguincover_server_url", url)
-end
-
-local function isValidServerUrl(url)
-    return type(url) == "string" and url:match("^https?://[%w%-%._~:/%?#%[%]@!$&%'%(%)%*%+,;=]+$")
 end
 
 local function getOptionalFontSize(setting_key)
@@ -113,26 +101,32 @@ local function setAuthorFontSize(size)
     setOptionalFontSize("penguincover_author_font_size", size)
 end
 
--- Image helpers ---------------------------------------------------------------
-
-local IMAGE_EXTS = { jpg=true, jpeg=true, png=true, webp=true, bmp=true }
-
-local function isImage(name)
-    local ext = name:match("%.([^%.]+)$")
-    return ext and IMAGE_EXTS[ext:lower()]
-end
-
-local function listImages(folder)
-    local list = {}
-    local ok, iter, dir_obj = pcall(lfs.dir, folder)
-    if not ok then return list end
-    for entry in iter, dir_obj do
-        if entry ~= "." and entry ~= ".." and isImage(entry) then
-            list[#list+1] = { name = entry, path = folder .. "/" .. entry }
+local function getFallbackFonts()
+    local root = getKoreaderDir()
+    local fonts = {}
+    for _, rel in ipairs(FALLBACK_FONT_FILES) do
+        local path = root .. "/" .. rel
+        if lfs.attributes(path, "mode") == "file" then
+            fonts[#fonts + 1] = path
         end
     end
-    table.sort(list, function(a, b) return a.name:lower() < b.name:lower() end)
-    return list
+    return fonts
+end
+
+local function getTempCoverPath()
+    local ok, DS = pcall(require, "datastorage")
+    if ok and DS then
+        local cache_dir = DS:getDataDir() .. "/cache"
+        if lfs.attributes(cache_dir, "mode") == "directory" then
+            return cache_dir .. "/classicscover-cover.png"
+        end
+    end
+    return "/tmp/classicscover-cover.png"
+end
+
+local function normalizeText(s)
+    -- Same whitespace normalisation as the old server: " ".join(value.split()).
+    return (s or ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
 end
 
 -- Book metadata ---------------------------------------------------------------
@@ -190,135 +184,49 @@ local function invalidateThumbnail(file_path)
     if ok and BIM then BIM:deleteBookInfo(file_path) end
 end
 
--- HTTP multipart POST ---------------------------------------------------------
+-- Core: render and apply cover ------------------------------------------------
 
-local function buildMultipart(boundary, fields, file)
-    local p = {}
-    for _, f in ipairs(fields) do
-        p[#p+1] = "--" .. boundary .. "\r\n"
-            .. "Content-Disposition: form-data; name=\"" .. f.name .. "\"\r\n\r\n"
-            .. f.value .. "\r\n"
-    end
-    if file then
-        p[#p+1] = "--" .. boundary .. "\r\n"
-            .. "Content-Disposition: form-data; name=\"" .. file.name
-            .. "\"; filename=\"" .. file.filename .. "\"\r\n"
-            .. "Content-Type: " .. file.content_type .. "\r\n\r\n"
-        p[#p+1] = file.data
-        p[#p+1] = "\r\n"
-    end
-    p[#p+1] = "--" .. boundary .. "--\r\n"
-    return table.concat(p)
-end
-
-local function httpPost(url, body, content_type)
-    local ok1, http  = pcall(require, "socket.http")
-    local ok2, ltn12 = pcall(require, "ltn12")
-    if not (ok1 and ok2) then return nil, "LuaSocket not available" end
-    local chunks = {}
-    http.TIMEOUT = 30
-    local _, code = http.request{
-        url     = url,
-        method  = "POST",
-        headers = {
-            ["Content-Type"]   = content_type,
-            ["Content-Length"] = tostring(#body),
-        },
-        source = ltn12.source.string(body),
-        sink   = ltn12.sink.table(chunks),
-    }
-    if code ~= 200 then
-        return nil, "HTTP " .. tostring(code) .. ": " .. table.concat(chunks)
-    end
-    return table.concat(chunks), nil
-end
-
-local function getFontSizeField(name, value)
-    if not value then
-        return nil
-    end
-    return { name = name, value = tostring(value) }
-end
-
--- Core: generate and apply cover ----------------------------------------------
-
-local function generateAndApplyCover(file_path, title, author, bg_path)
-    local f = io.open(bg_path, "rb")
-    if not f then
-        UIManager:show(InfoMessage:new{
-            text = T(_("Cannot open background image:\n%1"), bg_path), timeout = 4 })
-        return
-    end
-    local bg_data = f:read("*a")
-    f:close()
-
-    if #bg_data == 0 then
-        UIManager:show(InfoMessage:new{
-            text = _("Background image is empty."), timeout = 3 })
-        return
-    end
-
-    local ext  = (bg_path:match("%.([^%.]+)$") or "jpg"):lower()
-    local mime = (ext == "png")  and "image/png"
-              or (ext == "webp") and "image/webp"
-              or "image/jpeg"
+local function generateAndApplyCover(plugin_dir, file_path, title, author)
+    local out_path = getTempCoverPath()
 
     local spinner = InfoMessage:new{
         text = _("Generating Classics cover..."), timeout = 0 }
     UIManager:show(spinner)
     UIManager:forceRePaint()
 
-    local fields = {
-        { name = "title", value = title },
-        { name = "author", value = author },
+    local info, err = CoverRenderer.render{
+        title            = title,
+        author           = author,
+        title_font_path  = plugin_dir .. TITLE_FONT_FILE,
+        author_font_path = plugin_dir .. AUTHOR_FONT_FILE,
+        logo_path        = plugin_dir .. LOGO_FILE,
+        title_font_size  = getTitleFontSize(),
+        author_font_size = getAuthorFontSize(),
+        fallback_fonts   = getFallbackFonts(),
+        output_path      = out_path,
     }
-    local title_font_size = getTitleFontSize()
-    local author_font_size = getAuthorFontSize()
-    local title_field = getFontSizeField("title_font_size", title_font_size)
-    local author_field = getFontSizeField("author_font_size", author_font_size)
-    if title_field then
-        fields[#fields + 1] = title_field
-    end
-    if author_field then
-        fields[#fields + 1] = author_field
-    end
 
-    local boundary = "PenguinBoundary" .. tostring(os.time()) .. tostring(math.random(1000, 9999))
-    local body     = buildMultipart(boundary, fields,
-        { name="image", filename=ffiutil.basename(bg_path),
-          content_type=mime, data=bg_data })
-    local ct = "multipart/form-data; boundary=" .. boundary
-
-    local response, err = httpPost(getServerUrl(), body, ct)
     UIManager:close(spinner)
 
-    if err or not response or #response < 100 then
+    if not info then
+        os.remove(out_path)
         UIManager:show(InfoMessage:new{
-            text = T(_("Cover generation failed:\n%1"), err or "Empty response"),
-            timeout = 5 })
+            text    = T(_("Cover generation failed:\n%1"), err or _("Unknown error")),
+            timeout = 6 })
         return
     end
-
-    local out = io.open(TMP_COVER_PATH, "wb")
-    if not out then
-        UIManager:show(InfoMessage:new{
-            text = T(_("Cannot save temporary cover:\n%1"), TMP_COVER_PATH), timeout = 4 })
-        return
-    end
-    out:write(response)
-    out:close()
 
     local DocSettings = require("docsettings")
     local ds = DocSettings:open(file_path)
-    if not ds:flushCustomCover(file_path, TMP_COVER_PATH) then
-        os.remove(TMP_COVER_PATH)
+    if not ds:flushCustomCover(file_path, out_path) then
+        os.remove(out_path)
         UIManager:show(InfoMessage:new{
             text = _("Cover was generated, but KOReader could not store it as a custom cover."),
             timeout = 5 })
         return
     end
     ds:getCustomCoverFile(true)
-    os.remove(TMP_COVER_PATH)
+    os.remove(out_path)
 
     invalidateThumbnail(file_path)
     UIManager:broadcastEvent(Event:new("InvalidateMetadataCache", file_path))
@@ -331,9 +239,9 @@ local function generateAndApplyCover(file_path, title, author, bg_path)
     if FM.instance then FM.instance:onRefresh() end
 end
 
--- UI Step 2: confirm title / author -------------------------------------------
+-- UI: confirm title / author --------------------------------------------------
 
-local function showEditDialog(file_path, title, author, bg_path)
+local function showEditDialog(plugin_dir, file_path, title, author)
     local dlg
     dlg = MultiInputDialog:new{
         title  = _("Confirm Book Details"),
@@ -351,12 +259,20 @@ local function showEditDialog(file_path, title, author, bg_path)
                 is_enter_default = true,
                 callback         = function()
                     local fields = dlg:getFields()
-                    local t = (fields[1] or title):match("^%s*(.-)%s*$")
-                    local a = (fields[2] or author):match("^%s*(.-)%s*$")
+                    local t = normalizeText(fields[1] or title)
+                    local a = normalizeText(fields[2] or author)
+                    if t == "" then
+                        UIManager:show(InfoMessage:new{
+                            text = _("Title is required."), timeout = 3 })
+                        return
+                    end
+                    if a == "" then
+                        UIManager:show(InfoMessage:new{
+                            text = _("Author is required."), timeout = 3 })
+                        return
+                    end
                     UIManager:close(dlg)
-                    NetworkMgr:runWhenOnline(function()
-                        generateAndApplyCover(file_path, t, a, bg_path)
-                    end)
+                    generateAndApplyCover(plugin_dir, file_path, t, a)
                 end,
             },
         }},
@@ -365,64 +281,17 @@ local function showEditDialog(file_path, title, author, bg_path)
     dlg:onShowKeyboard()
 end
 
--- UI Step 1: background image picker ------------------------------------------
-
-local function showBackgroundPicker(file_path, title, author)
-    local folder = getBackgroundsFolder()
-
-    if lfs.attributes(folder, "mode") ~= "directory" then
-        lfs.mkdir(folder)
-        UIManager:show(InfoMessage:new{
-            text = T(_(
-                "Backgrounds folder created:\n%1\n\n"
-                .. "Add JPG/PNG images there, then try again.\n"
-                .. "Change folder: Tools > Classics Cover Generator"
-            ), folder),
-            timeout = 6 })
-        return
-    end
-
-    local images = listImages(folder)
-    if #images == 0 then
-        UIManager:show(InfoMessage:new{
-            text = T(_(
-                "No images found in:\n%1\n\n"
-                .. "Add JPG or PNG files there.\n"
-                .. "Change folder: Tools > Classics Cover Generator"
-            ), folder),
-            timeout = 5 })
-        return
-    end
-
-    local picker = PathChooser:new{
-        title = _("Select Background Image"),
-        path = folder,
-        select_directory = false,
-        select_file = true,
-        show_files = true,
-        detailed_file_info = false,
-        file_filter = function(filename)
-            return isImage(filename)
-        end,
-        onConfirm = function(bg_path)
-            showEditDialog(file_path, title, author, bg_path)
-        end,
-    }
-    UIManager:show(picker)
-end
-
 -- Entry point -----------------------------------------------------------------
 
-local function onGenerateCover(file_path)
+local function onGenerateCover(plugin_dir, file_path)
     local title, author = getBookMeta(file_path)
-    showBackgroundPicker(file_path, title, author)
+    showEditDialog(plugin_dir, file_path, title, author)
 end
 
 -- Plugin lifecycle ------------------------------------------------------------
 
-function PenguinCover:init()
-    getServerUrl()
-    getBackgroundsFolder()
+function ClassicsCover:init()
+    self.plugin_dir = self.path or PLUGIN_DIR
     getTitleFontSize()
     getAuthorFontSize()
     if not self.ui.document then
@@ -431,23 +300,23 @@ function PenguinCover:init()
     self:_registerFileDialogButton()
 end
 
-function PenguinCover:onTeardown()
+function ClassicsCover:onTeardown()
     local ok, FileManager = pcall(require, "apps/filemanager/filemanager")
     if ok and FileManager and FileManager.removeFileDialogButtons then
-        FileManager:removeFileDialogButtons("penguin_cover")
-        FileManager._penguincover_button_registered = nil
+        FileManager:removeFileDialogButtons("classics_cover")
+        FileManager._classicscover_button_registered = nil
     end
 end
 
-function PenguinCover:_registerFileDialogButton()
+function ClassicsCover:_registerFileDialogButton()
     local ok, FileManager = pcall(require, "apps/filemanager/filemanager")
-    if not ok or not FileManager or FileManager._penguincover_button_registered then
+    if not ok or not FileManager or FileManager._classicscover_button_registered then
         return
     end
-    FileManager._penguincover_button_registered = true
+    FileManager._classicscover_button_registered = true
 
     local DocumentRegistry = require("document/documentregistry")
-    FileManager:addFileDialogButtons("penguin_cover", function(file, is_file)
+    FileManager:addFileDialogButtons("classics_cover", function(file, is_file)
         if not is_file or not DocumentRegistry:hasProvider(file) then
             return nil
         end
@@ -458,7 +327,7 @@ function PenguinCover:_registerFileDialogButton()
                 if fc and fc.file_dialog then
                     UIManager:close(fc.file_dialog)
                 end
-                onGenerateCover(file)
+                onGenerateCover(self.plugin_dir, file)
             end,
         }}
     end)
@@ -466,135 +335,81 @@ end
 
 -- Tools menu ------------------------------------------------------------------
 
-function PenguinCover:addToMainMenu(menu_items)
-    menu_items.penguin_cover = {
+local function showFontSizeDialog(setting_key, title, description, setter)
+    local inp
+    inp = InputDialog:new{
+        title       = title,
+        input       = tostring(getOptionalFontSize(setting_key) or ""),
+        input_hint  = _("Leave empty for default"),
+        description = description,
+        buttons = {{
+            {
+                text     = _("Cancel"),
+                callback = function() UIManager:close(inp) end,
+            },
+            {
+                text     = _("Reset default"),
+                callback = function()
+                    setter(nil)
+                    UIManager:close(inp)
+                    UIManager:show(InfoMessage:new{
+                        text    = _("Reset to the default size."),
+                        timeout = 3 })
+                end,
+            },
+            {
+                text             = _("Save"),
+                is_enter_default = true,
+                callback         = function()
+                    local raw = inp:getInputText():match("^%s*(.-)%s*$")
+                    if raw == "" then
+                        setter(nil)
+                        UIManager:close(inp)
+                        return
+                    end
+
+                    local size = tonumber(raw)
+                    if not size or size < MIN_FONT_SIZE or size > MAX_FONT_SIZE then
+                        UIManager:show(InfoMessage:new{
+                            text    = T(_("Enter a number between %1 and %2."),
+                                        MIN_FONT_SIZE, MAX_FONT_SIZE),
+                            timeout = 4 })
+                        return
+                    end
+
+                    size = math.floor(size)
+                    setter(size)
+                    UIManager:close(inp)
+                    UIManager:show(InfoMessage:new{
+                        text    = T(_("Font size set to %1."), size),
+                        timeout = 3 })
+                end,
+            },
+        }},
+    }
+    UIManager:show(inp)
+    inp:onShowKeyboard()
+end
+
+function ClassicsCover:addToMainMenu(menu_items)
+    menu_items.classicscover = {
         text           = _("Classics Cover Generator"),
         sorting_hint   = "tools",
         sub_item_table = {
-
-            -- Set backgrounds folder
-            {
-                text           = _("Set backgrounds folder"),
-                keep_menu_open = true,
-                callback       = function()
-                    local inp
-                    inp = InputDialog:new{
-                        title       = _("Backgrounds folder"),
-                        input       = getBackgroundsFolder(),
-                        input_hint  = _("/path/to/your/backgrounds"),
-                        description = _(
-                            "Folder with JPG/PNG background images.\n"
-                            .. "Empty = reset to default (<koreader>/backgrounds/)."
-                        ),
-                        buttons = {{
-                            {
-                                text     = _("Cancel"),
-                                callback = function() UIManager:close(inp) end,
-                            },
-                            {
-                                text     = _("Reset default"),
-                                callback = function()
-                                    setBackgroundsFolder("")
-                                    UIManager:close(inp)
-                                    UIManager:show(InfoMessage:new{
-                                        text    = T(_("Reset. Default:\n%1"),
-                                                    getKoreaderDir() .. "/backgrounds"),
-                                        timeout = 3 })
-                                end,
-                            },
-                            {
-                                text             = _("Save"),
-                                is_enter_default = true,
-                                callback         = function()
-                                    local path = inp:getInputText():match("^%s*(.-)%s*$")
-                                    if path == "" then
-                                        setBackgroundsFolder("")
-                                        UIManager:close(inp)
-                                        return
-                                    end
-                                    if lfs.attributes(path, "mode") ~= "directory" then
-                                        if not lfs.mkdir(path) then
-                                            UIManager:show(InfoMessage:new{
-                                                text    = T(_("Cannot create:\n%1"), path),
-                                                timeout = 4 })
-                                            return
-                                        end
-                                    end
-                                    setBackgroundsFolder(path)
-                                    UIManager:close(inp)
-                                    UIManager:show(InfoMessage:new{
-                                        text    = T(_("Folder set to:\n%1"), path),
-                                        timeout = 3 })
-                                end,
-                            },
-                        }},
-                    }
-                    UIManager:show(inp)
-                    inp:onShowKeyboard()
-                end,
-            },
 
             -- Title font size
             {
                 text           = _("Set title font size"),
                 keep_menu_open = true,
                 callback       = function()
-                    local inp
-                    inp = InputDialog:new{
-                        title       = _("Title font size"),
-                        input       = tostring(getTitleFontSize() or ""),
-                        input_hint  = _("Leave empty for default"),
-                        description = T(_(
-                            "Optional size for the book title text.\n"
-                            .. "Default size: %1.\n"
-                            .. "Empty = use the server default layout."
-                        ), DEFAULT_TITLE_FONT_SIZE),
-                        buttons = {{
-                            {
-                                text     = _("Cancel"),
-                                callback = function() UIManager:close(inp) end,
-                            },
-                            {
-                                text     = _("Reset default"),
-                                callback = function()
-                                    setTitleFontSize(nil)
-                                    UIManager:close(inp)
-                                    UIManager:show(InfoMessage:new{
-                                        text    = _("Title font size reset to server default."),
-                                        timeout = 3 })
-                                end,
-                            },
-                            {
-                                text             = _("Save"),
-                                is_enter_default = true,
-                                callback         = function()
-                                    local raw = inp:getInputText():match("^%s*(.-)%s*$")
-                                    if raw == "" then
-                                        setTitleFontSize(nil)
-                                        UIManager:close(inp)
-                                        return
-                                    end
-
-                                    local size = tonumber(raw)
-                                    if not size or size <= 0 then
-                                        UIManager:show(InfoMessage:new{
-                                            text    = _("Enter a positive number for the title font size."),
-                                            timeout = 4 })
-                                        return
-                                    end
-
-                                    size = math.floor(size)
-                                    setTitleFontSize(size)
-                                    UIManager:close(inp)
-                                    UIManager:show(InfoMessage:new{
-                                        text    = T(_("Title font size set to %1."), size),
-                                        timeout = 3 })
-                                end,
-                            },
-                        }},
-                    }
-                    UIManager:show(inp)
-                    inp:onShowKeyboard()
+                    showFontSizeDialog("penguincover_title_font_size",
+                        _("Title font size"),
+                        T(_(
+                            "Size of the book title on the cover, in pixels.\n"
+                            .. "Default: %1. Range: %2 to %3.\n"
+                            .. "Empty = default."
+                        ), DEFAULT_TITLE_FONT_SIZE, MIN_FONT_SIZE, MAX_FONT_SIZE),
+                        setTitleFontSize)
                 end,
             },
 
@@ -603,104 +418,14 @@ function PenguinCover:addToMainMenu(menu_items)
                 text           = _("Set author font size"),
                 keep_menu_open = true,
                 callback       = function()
-                    local inp
-                    inp = InputDialog:new{
-                        title       = _("Author font size"),
-                        input       = tostring(getAuthorFontSize() or ""),
-                        input_hint  = _("Leave empty for default"),
-                        description = T(_(
-                            "Optional size for the author text.\n"
-                            .. "Default size: %1.\n"
-                            .. "Empty = use the server default layout."
-                        ), DEFAULT_AUTHOR_FONT_SIZE),
-                        buttons = {{
-                            {
-                                text     = _("Cancel"),
-                                callback = function() UIManager:close(inp) end,
-                            },
-                            {
-                                text     = _("Reset default"),
-                                callback = function()
-                                    setAuthorFontSize(nil)
-                                    UIManager:close(inp)
-                                    UIManager:show(InfoMessage:new{
-                                        text    = _("Author font size reset to server default."),
-                                        timeout = 3 })
-                                end,
-                            },
-                            {
-                                text             = _("Save"),
-                                is_enter_default = true,
-                                callback         = function()
-                                    local raw = inp:getInputText():match("^%s*(.-)%s*$")
-                                    if raw == "" then
-                                        setAuthorFontSize(nil)
-                                        UIManager:close(inp)
-                                        return
-                                    end
-
-                                    local size = tonumber(raw)
-                                    if not size or size <= 0 then
-                                        UIManager:show(InfoMessage:new{
-                                            text    = _("Enter a positive number for the author font size."),
-                                            timeout = 4 })
-                                        return
-                                    end
-
-                                    size = math.floor(size)
-                                    setAuthorFontSize(size)
-                                    UIManager:close(inp)
-                                    UIManager:show(InfoMessage:new{
-                                        text    = T(_("Author font size set to %1."), size),
-                                        timeout = 3 })
-                                end,
-                            },
-                        }},
-                    }
-                    UIManager:show(inp)
-                    inp:onShowKeyboard()
-                end,
-            },
-
-            -- Change server URL
-            {
-                text           = _("Change server URL"),
-                keep_menu_open = true,
-                callback       = function()
-                    local inp
-                    inp = InputDialog:new{
-                        title      = _("Cover server URL"),
-                        input      = getServerUrl(),
-                        input_hint = "https://example.com/generate",
-                        buttons    = {{
-                            {
-                                text     = _("Cancel"),
-                                callback = function() UIManager:close(inp) end,
-                            },
-                            {
-                                text             = _("Save"),
-                                is_enter_default = true,
-                                callback         = function()
-                                    local url = inp:getInputText():match("^%s*(.-)%s*$")
-                                    if url ~= "" then
-                                        if not isValidServerUrl(url) then
-                                            UIManager:show(InfoMessage:new{
-                                                text    = _("Enter a valid http:// or https:// server URL."),
-                                                timeout = 4 })
-                                            return
-                                        end
-                                        setServerUrl(url)
-                                        UIManager:show(InfoMessage:new{
-                                            text    = T(_("URL saved:\n%1"), url),
-                                            timeout = 3 })
-                                    end
-                                    UIManager:close(inp)
-                                end,
-                            },
-                        }},
-                    }
-                    UIManager:show(inp)
-                    inp:onShowKeyboard()
+                    showFontSizeDialog("penguincover_author_font_size",
+                        _("Author font size"),
+                        T(_(
+                            "Size of the author name on the cover, in pixels.\n"
+                            .. "Default: %1. Range: %2 to %3.\n"
+                            .. "Empty = default."
+                        ), DEFAULT_AUTHOR_FONT_SIZE, MIN_FONT_SIZE, MAX_FONT_SIZE),
+                        setAuthorFontSize)
                 end,
             },
 
@@ -711,12 +436,15 @@ function PenguinCover:addToMainMenu(menu_items)
                     UIManager:show(InfoMessage:new{
                         text = T(_(
                             "Classics Cover Generator\n\n"
-                            .. "Hold a book > Classics Cover\n"
-                            .. "Pick a background image, confirm\n"
-                            .. "title/author, cover is applied.\n\n"
-                            .. "Backgrounds folder:\n%1\n\n"
-                            .. "Server:\n%2"
-                        ), getBackgroundsFolder(), getServerUrl()),
+                            .. "Generates a Classics-style cover entirely on this device:\n"
+                            .. "a random gradient background, the Classics strip, and the\n"
+                            .. "book's title and author. No network connection is needed.\n\n"
+                            .. "Hold a book > Classics Cover, confirm the title/author,\n"
+                            .. "then tap Generate.\n\n"
+                            .. "Title font size: %1\n"
+                            .. "Author font size: %2"
+                        ), getTitleFontSize() or DEFAULT_TITLE_FONT_SIZE,
+                           getAuthorFontSize() or DEFAULT_AUTHOR_FONT_SIZE),
                     })
                 end,
             },
@@ -724,4 +452,4 @@ function PenguinCover:addToMainMenu(menu_items)
     }
 end
 
-return PenguinCover
+return ClassicsCover
